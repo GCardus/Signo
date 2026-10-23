@@ -6,7 +6,7 @@
 
 **Pas 3:** Instal·lar Python.
 
-**Pas 4:** Posar a la consola de Windows: `"pip install request"` `"pip install cv2"` `"pip install numpy"` `"pip install mediapipe"` `"pip install pygame"` `"pip install scikit-learn"` `"pip install joblib"` `"pip install pandas"`
+**Pas 4:** Posar a la consola de Windows: `"pip install requests"` `"pip install cv2"` `"pip install numpy"` `"pip install mediapipe"` `"pip install pygame"` `"pip install scikit-learn"` `"pip install joblib"` `"pip install pandas"`
 
 **Pas 5:** Copiar el codi des de GitHub de l'enllaç: https://github.com/GCardus/SIGNO.
 
