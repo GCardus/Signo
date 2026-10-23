@@ -1,0 +1,1247 @@
+import os
+import sys
+import time
+import random
+import json
+import math
+
+import cv2
+import numpy as np
+import pygame
+
+# Intents de carregar MediaPipe (opcional)
+try:
+    import mediapipe as mp
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+    MEDIAPIPE_DISPONIBLE = True
+except ImportError:
+    MEDIAPIPE_DISPONIBLE = False
+    print("MediaPipe no instal·lat. Mode demostració (tecla ESPAI).")
+
+# Inicialitzar Pygame
+pygame.init()
+pygame.mixer.init()
+
+# ---------- Constants ----------
+WIDTH, HEIGHT = 1024, 768
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+GRAY = (128, 128, 128)
+DARK_GRAY = (64, 64, 64)
+BLUE = (100, 150, 255)
+DARK_BLUE = (70, 120, 200)
+RED = (255, 100, 100)
+GREEN = (100, 255, 100)
+YELLOW = (255, 255, 100)
+ORANGE = (255, 165, 0)
+PURPLE = (200, 100, 255)
+
+PLAYER_POS = (150, 180)
+MONSTER_POS = (WIDTH - 200, 180)
+WEBCAM_POS = (WIDTH // 2 - 160, HEIGHT - 260)
+
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("SIGNO - Batalla de Signes")
+clock = pygame.time.Clock()
+
+font_large = pygame.font.Font(None, 74)
+font_medium = pygame.font.Font(None, 48)
+font_small = pygame.font.Font(None, 36)
+
+# ---------- Variables globals ----------
+idioma = "Català"
+volum = 50
+dificultat = "Normal"
+use_letters = True
+use_numbers = True
+webcam = None
+high_score = 0
+MODE_DEMO = False  # es posarà a True si no es pot carregar MediaPipe
+
+# ---------- Carregar configuració ----------
+CONFIG_FILE = "signo_config.json"
+if os.path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+            idioma = config.get("idioma", "Català")
+            volum = config.get("volum", 50)
+            dificultat = config.get("dificultat", "Normal")
+            use_letters = config.get("use_letters", True)
+            use_numbers = config.get("use_numbers", True)
+            high_score = config.get("high_score", 0)
+    except:
+        pass
+
+def save_config():
+    config = {
+        "idioma": idioma,
+        "volum": volum,
+        "dificultat": dificultat,
+        "use_letters": use_letters,
+        "use_numbers": use_numbers,
+        "high_score": high_score
+    }
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+    except:
+        pass
+
+# ---------- Carregar logo ----------
+LOGO_PATH = r"c:\Users\guill\Downloads\ChatGPT Image 13 de juny del 2026, 11_42_57.png"
+if os.path.exists(LOGO_PATH):
+    try:
+        logo_img = pygame.image.load(LOGO_PATH).convert_alpha()
+        logo_width = min(logo_img.get_width(), 200)
+        logo_height = int(logo_img.get_height() * (logo_width / logo_img.get_width()))
+        logo_img = pygame.transform.scale(logo_img, (logo_width, logo_height))
+        print(f"Logo carregat: {LOGO_PATH}")
+    except Exception as e:
+        logo_img = None
+        print(f"Error logo: {e}")
+else:
+    logo_img = None
+    print("Logo no trobat.")
+
+# ---------- Carregar sons ----------
+sounds = {}
+def load_sound(name, file_path):
+    try:
+        if os.path.exists(file_path):
+            sound = pygame.mixer.Sound(file_path)
+            sound.set_volume(volum / 100.0)
+            sounds[name] = sound
+            print(f"So carregat: {name}")
+        else:
+            sounds[name] = None
+    except Exception as e:
+        sounds[name] = None
+        print(f"Error so {name}: {e}")
+
+load_sound("hit", r"C:\Users\guill\Downloads\dragon-studio-epic-spell-impact-478364.mp3")
+load_sound("powerup", r"C:\Users\guill\Downloads\freesound_community-8-bit-powerup-6768.mp3")
+load_sound("victory", r"C:\Users\guill\Downloads\scratchonix-drum-roll-for-victory-366448.mp3")
+load_sound("defeat", r"C:\Users\guill\Downloads\olenchic-fiasco-154915.mp3")
+
+music_file = "background_music.mp3"
+if os.path.exists(music_file):
+    try:
+        pygame.mixer.music.load(music_file)
+        pygame.mixer.music.play(-1)
+        pygame.mixer.music.set_volume(volum / 100.0)
+    except:
+        pass
+
+def update_all_volumes():
+    for snd in sounds.values():
+        if snd:
+            snd.set_volume(volum / 100.0)
+    pygame.mixer.music.set_volume(volum / 100.0)
+
+# ---------- Classe de detecció de signes (codi 3) ----------
+class SistemaJocUniversal:
+    def __init__(self):
+        self.lletra_actual = ""
+        self.missatge_pantalla = ""
+        self.color_text = (0, 255, 255)
+        self.temps_inici_exit = 0
+        self.signe_completat = False
+        self.historial_instantani = []
+        self.MIDA_FILTRE = 10
+        self.FOTOGRAMES_REQUERITS = 8
+        self.lletra_estabilitzada = None
+        self.contador_estabilitat = 0
+
+    def iniciar_nivell(self, lletra):
+        self.lletra_actual = lletra.upper()
+        self.signe_completat = False
+        self.missatge_pantalla = f"FES LA LLETRA: {self.lletra_actual}"
+        self.color_text = (0, 255, 255)
+        self.contador_estabilitat = 0
+        self.lletra_estabilitzada = None
+        self.historial_instantani.clear()
+
+    def calcular_distancia_2d(self, p1, p2):
+        return math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2)
+
+    def calcular_angle_3d(self, p_base, p_articulacio, p_punta):
+        try:
+            ba_x, ba_y, ba_z = p_base.x - p_articulacio.x, p_base.y - p_articulacio.y, p_base.z - p_articulacio.z
+            pa_x, pa_y, pa_z = p_punta.x - p_articulacio.x, p_punta.y - p_articulacio.y, p_punta.z - p_articulacio.z
+            escalar = ba_x * pa_x + ba_y * pa_y + ba_z * pa_z
+            mag_ba = math.sqrt(ba_x**2 + ba_y**2 + ba_z**2)
+            mag_pa = math.sqrt(pa_x**2 + pa_y**2 + pa_z**2)
+            if mag_ba == 0 or mag_pa == 0:
+                return 180
+            cos_theta = max(-1.0, min(1.0, escalar / (mag_ba * mag_pa)))
+            return math.degrees(math.acos(cos_theta))
+        except:
+            return 180
+
+    def actualitzar(self, hand_landmarks):
+        if self.signe_completat:
+            if time.time() - self.temps_inici_exit < 2.5:
+                return f"¡EXCEL·LENT! LLETRA {self.lletra_actual}", (0, 255, 0), True
+            else:
+                self.iniciar_nivell(self.lletra_actual)
+
+        lletra_frame = None
+        if hand_landmarks is not None:
+            pts = hand_landmarks
+            mida_palmell = (self.calcular_distancia_2d(pts[0], pts[9]) +
+                            self.calcular_distancia_2d(pts[5], pts[17])) / 2.0
+            if mida_palmell == 0:
+                mida_palmell = 0.01
+
+            # Índex
+            ang_idx_1 = self.calcular_angle_3d(pts[5], pts[6], pts[7])
+            ang_idx_2 = self.calcular_angle_3d(pts[6], pts[7], pts[8])
+            idx_recte = ang_idx_1 > 145 and ang_idx_2 > 145
+            idx_tancat = ang_idx_1 < 110 and ang_idx_2 < 110
+            # Mig
+            ang_mig_1 = self.calcular_angle_3d(pts[9], pts[10], pts[11])
+            ang_mig_2 = self.calcular_angle_3d(pts[10], pts[11], pts[12])
+            mig_recte = ang_mig_1 > 145 and ang_mig_2 > 145
+            mig_tancat = ang_mig_1 < 110 and ang_mig_2 < 110
+            # Anular
+            ang_anu_1 = self.calcular_angle_3d(pts[13], pts[14], pts[15])
+            ang_anu_2 = self.calcular_angle_3d(pts[14], pts[15], pts[16])
+            anu_recte = ang_anu_1 > 145 and ang_anu_2 > 145
+            anu_tancat = ang_anu_1 < 110 and ang_anu_2 < 110
+            # Petit
+            ang_pet_1 = self.calcular_angle_3d(pts[17], pts[18], pts[19])
+            ang_pet_2 = self.calcular_angle_3d(pts[18], pts[19], pts[20])
+            pet_recte = ang_pet_1 > 145 and ang_pet_2 > 145
+            pet_tancat = ang_pet_1 < 110 and ang_pet_2 < 110
+            # Polze
+            ang_polze = self.calcular_angle_3d(pts[2], pts[3], pts[4])
+            polze_separat = (self.calcular_distancia_2d(pts[4], pts[5]) / mida_palmell) > 0.65
+            index_es_horitzontal = abs(pts[8].x - pts[5].x) > abs(pts[8].y - pts[5].y)
+            index_apunta_avall = pts[8].y > pts[5].y
+
+            # Reconeixement (només lletres que suporta)
+            if idx_tancat and mig_tancat and anu_tancat and pet_tancat and not polze_separat:
+                if self.calcular_distancia_2d(pts[4], pts[10]) > (mida_palmell * 0.4):
+                    lletra_frame = "A"
+            elif idx_recte and mig_recte and anu_recte and pet_recte and not polze_separat:
+                lletra_frame = "B"
+            elif (110 <= ang_idx_1 <= 140) and (110 <= ang_mig_1 <= 140) and polze_separat:
+                lletra_frame = "C"
+            elif idx_recte and mig_tancat and anu_tancat and pet_tancat and not polze_separat:
+                lletra_frame = "D"
+            elif (60 < ang_idx_1 < 100) and (60 < ang_mig_1 < 100) and not polze_separat:
+                if pts[8].y < pts[5].y:
+                    lletra_frame = "E"
+            elif idx_tancat and mig_recte and anu_recte and pet_recte:
+                if self.calcular_distancia_2d(pts[8], pts[4]) < (mida_palmell * 0.4):
+                    lletra_frame = "F"
+            elif idx_recte and mig_tancat and anu_tancat and pet_tancat and index_es_horitzontal:
+                lletra_frame = "G"
+            elif idx_recte and mig_recte and anu_tancat and pet_tancat and index_es_horitzontal:
+                lletra_frame = "H"
+            elif pet_recte and idx_tancat and mig_tancat and anu_tancat:
+                lletra_frame = "I"
+            elif idx_recte and polze_separat and mig_tancat and anu_tancat and pet_tancat:
+                lletra_frame = "L"
+            elif idx_tancat and mig_tancat and anu_tancat and pet_tancat:
+                dist_index_polze = self.calcular_distancia_2d(pts[8], pts[4])
+                dist_petit_polze = self.calcular_distancia_2d(pts[20], pts[4])
+                if dist_index_polze < (mida_palmell * 0.45) and dist_petit_polze < (mida_palmell * 0.6):
+                    lletra_frame = "O"
+            elif idx_recte and mig_recte and anu_recte and pet_recte and polze_separat:
+                lletra_frame = "P"
+            elif idx_recte and index_apunta_avall and mig_tancat and anu_tancat and pet_tancat:
+                lletra_frame = "Q"
+            elif idx_recte and mig_recte and anu_tancat and pet_tancat:
+                if self.calcular_distancia_2d(pts[8], pts[12]) < (mida_palmell * 0.22):
+                    lletra_frame = "R"
+            elif idx_tancat and mig_tancat and anu_tancat and pet_tancat:
+                if self.calcular_distancia_2d(pts[4], pts[10]) < (mida_palmell * 0.35):
+                    lletra_frame = "S"
+            elif idx_tancat and mig_tancat and anu_tancat and pet_tancat:
+                if pts[4].y < pts[8].y and abs(pts[4].x - pts[6].x) < 0.05:
+                    lletra_frame = "T"
+            elif idx_recte and mig_recte and anu_tancat and pet_tancat:
+                if self.calcular_distancia_2d(pts[8], pts[12]) < (mida_palmell * 0.35):
+                    lletra_frame = "U"
+            elif idx_recte and mig_recte and anu_tancat and pet_tancat:
+                if self.calcular_distancia_2d(pts[8], pts[12]) >= (mida_palmell * 0.35):
+                    lletra_frame = "V"
+            elif idx_recte and mig_recte and anu_recte and not pet_recte:
+                lletra_frame = "W"
+            elif pet_recte and polze_separat and idx_tancat and mig_tancat and anu_tancat:
+                lletra_frame = "Y"
+
+        # Filtrat temporal
+        if lletra_frame is not None:
+            self.historial_instantani.append(lletra_frame)
+            if len(self.historial_instantani) > self.MIDA_FILTRE:
+                self.historial_instantani.pop(0)
+            if self.historial_instantani:
+                lletra_majoritaria = max(set(self.historial_instantani), key=self.historial_instantani.count)
+                if lletra_majoritaria == self.lletra_estabilitzada:
+                    self.contador_estabilitat += 1
+                else:
+                    self.lletra_estabilitzada = lletra_majoritaria
+                    self.contador_estabilitat = 0
+                if self.contador_estabilitat >= self.FOTOGRAMES_REQUERITS:
+                    if lletra_majoritaria == self.lletra_actual:
+                        self.signe_completat = True
+                        self.temps_inici_exit = time.time()
+                        return f"¡MOLT BE! LLETRA {self.lletra_actual}", (0, 255, 0), True
+                    else:
+                        return f"DETECTAT GEST DE LA '{lletra_majoritaria}'", (255, 165, 0), False
+        else:
+            if self.historial_instantani:
+                self.historial_instantani.pop(0)
+            self.contador_estabilitat = max(0, self.contador_estabilitat - 1)
+
+        return self.missatge_pantalla, self.color_text, False
+
+# ---------- Inicialitzar MediaPipe (codi 2) ----------
+detector_mans = None
+if MEDIAPIPE_DISPONIBLE:
+    DIRECTORI_ACTUAL = os.path.dirname(os.path.abspath(__file__))
+    RUTA_MANS = os.path.join(DIRECTORI_ACTUAL, 'hand_landmarker.task')
+    if os.path.exists(RUTA_MANS):
+        try:
+            BaseOptions = mp.tasks.BaseOptions
+            HandLandmarker = mp.tasks.vision.HandLandmarker
+            HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+            VisionRunningMode = mp.tasks.vision.RunningMode
+            opcions_mans = HandLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=RUTA_MANS),
+                running_mode=VisionRunningMode.IMAGE,
+                num_hands=1,
+                min_hand_detection_confidence=0.25,
+                min_hand_presence_confidence=0.25
+            )
+            detector_mans = HandLandmarker.create_from_options(opcions_mans)
+            print("Detector de mans carregat correctament.")
+        except Exception as e:
+            print(f"No s'ha pogut carregar el model de mans: {e}")
+            detector_mans = None
+    else:
+        print("Fitxer 'hand_landmarker.task' no trobat.")
+        detector_mans = None
+else:
+    print("MediaPipe no disponible.")
+
+if detector_mans is None:
+    MODE_DEMO = True
+    print("Mode demostració activat. Utilitza la tecla ESPAI per atacar.")
+
+# ---------- Classes auxiliars ----------
+class Button:
+    def __init__(self, x, y, width, height, text, color=BLUE, hover_color=DARK_BLUE):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.text = text
+        self.color = color
+        self.hover_color = hover_color
+        self.current_color = color
+
+    def draw(self, surface):
+        mouse_pos = pygame.mouse.get_pos()
+        if self.rect.collidepoint(mouse_pos):
+            self.current_color = self.hover_color
+        else:
+            self.current_color = self.color
+        pygame.draw.rect(surface, self.current_color, self.rect, border_radius=10)
+        pygame.draw.rect(surface, BLACK, self.rect, 3, border_radius=10)
+        text_surf = font_medium.render(self.text, True, WHITE)
+        text_rect = text_surf.get_rect(center=self.rect.center)
+        surface.blit(text_surf, text_rect)
+
+    def is_clicked(self, pos):
+        return self.rect.collidepoint(pos)
+
+class FloatingText:
+    def __init__(self, text, pos, color=RED, duration=0.8):
+        self.text = text
+        self.pos = list(pos)
+        self.color = color
+        self.start_time = time.time()
+        self.duration = duration
+
+    def update(self, current_time):
+        elapsed = current_time - self.start_time
+        if elapsed < self.duration:
+            self.pos[1] -= 0.5
+            return True
+        return False
+
+    def draw(self, surface):
+        surf = font_small.render(str(self.text), True, self.color)
+        surface.blit(surf, (int(self.pos[0]), int(self.pos[1])))
+
+class Particle:
+    def __init__(self, pos, vel, color, lifetime=0.5):
+        self.pos = list(pos)
+        self.vel = list(vel)
+        self.color = color
+        self.start_time = time.time()
+        self.lifetime = lifetime
+
+    def update(self, current_time):
+        elapsed = current_time - self.start_time
+        if elapsed < self.lifetime:
+            self.pos[0] += self.vel[0]
+            self.pos[1] += self.vel[1]
+            return True
+        return False
+
+    def draw(self, surface):
+        pygame.draw.circle(surface, self.color, (int(self.pos[0]), int(self.pos[1])), 3)
+
+# ---------- Funcions de dibuix ----------
+def draw_settings_icon(x, y, size=40):
+    pygame.draw.circle(screen, GRAY, (x + size//2, y + size//2), size//2)
+    pygame.draw.circle(screen, BLACK, (x + size//2, y + size//2), size//2, 3)
+    for angle in range(0, 360, 45):
+        rad = np.radians(angle)
+        dx = int((size//2 + 8) * np.cos(rad))
+        dy = int((size//2 + 8) * np.sin(rad))
+        pygame.draw.rect(screen, GRAY, (x + size//2 + dx - 5, y + size//2 + dy - 5, 10, 10))
+        pygame.draw.rect(screen, BLACK, (x + size//2 + dx - 5, y + size//2 + dy - 5, 10, 10), 2)
+
+def draw_health_bar(x, y, width, height, current_health, max_health, color):
+    ratio = current_health / max_health
+    fill_width = int(width * ratio)
+    pygame.draw.rect(screen, GRAY, (x, y, width, height), border_radius=5)
+    pygame.draw.rect(screen, color, (x, y, fill_width, height), border_radius=5)
+    pygame.draw.rect(screen, BLACK, (x, y, width, height), 2, border_radius=5)
+
+def draw_player(sword_angle=0):
+    px, py = PLAYER_POS
+    pygame.draw.ellipse(screen, (80, 80, 120), (px - 25, py - 10, 50, 60))
+    pygame.draw.circle(screen, (150, 150, 180), (px, py), 30)
+    pygame.draw.circle(screen, (200, 200, 220), (px, py), 28)
+    pygame.draw.rect(screen, BLACK, (px - 12, py - 8, 10, 6))
+    pygame.draw.rect(screen, BLACK, (px + 2, py - 8, 10, 6))
+    pygame.draw.line(screen, (100, 100, 120), (px - 20, py - 15), (px + 20, py - 15), 4)
+    sword_x = px + 25
+    sword_y = py + 10
+    angle_rad = np.radians(sword_angle)
+    tip_x = sword_x + 25 * np.cos(angle_rad)
+    tip_y = sword_y - 15 + 15 * np.sin(angle_rad)
+    pygame.draw.line(screen, (200, 200, 250), (sword_x, sword_y), (tip_x, tip_y), 6)
+    pygame.draw.polygon(screen, (220, 220, 255), [(tip_x, tip_y), (tip_x - 5, tip_y - 5), (tip_x + 5, tip_y - 5)])
+
+def draw_monster(center, monster_color, eye_color, has_horns, has_scales, flash=False):
+    mx, my = center
+    actual_color = (255, 200, 200) if flash else monster_color
+    pygame.draw.ellipse(screen, DARK_GRAY, (mx - 35, my - 20, 70, 80))
+    pygame.draw.ellipse(screen, actual_color, (mx - 30, my - 15, 60, 70))
+    if has_scales:
+        for i in range(5):
+            x = mx - 15 + i * 10
+            y = my + 10
+            pygame.draw.polygon(screen, (80, 40, 40), [(x, y), (x - 5, y + 8), (x + 5, y + 8)])
+    if has_horns:
+        pygame.draw.polygon(screen, (60, 40, 30), [(mx - 25, my - 25), (mx - 35, my - 50), (mx - 15, my - 35)])
+        pygame.draw.polygon(screen, (60, 40, 30), [(mx + 25, my - 25), (mx + 35, my - 50), (mx + 15, my - 35)])
+    eye_size = 6
+    pygame.draw.circle(screen, WHITE, (mx - 14, my - 10), eye_size + 1)
+    pygame.draw.circle(screen, eye_color, (mx - 14, my - 10), eye_size)
+    pygame.draw.circle(screen, WHITE, (mx - 16, my - 12), 2)
+    pygame.draw.circle(screen, WHITE, (mx + 14, my - 10), eye_size + 1)
+    pygame.draw.circle(screen, eye_color, (mx + 14, my - 10), eye_size)
+    pygame.draw.circle(screen, WHITE, (mx + 12, my - 12), 2)
+    pygame.draw.arc(screen, BLACK, (mx - 20, my + 5, 40, 20), 0, 3.14, 3)
+    for i in range(-1, 2):
+        tooth_x = mx + i * 10
+        pygame.draw.polygon(screen, WHITE, [(tooth_x, my + 5), (tooth_x - 4, my + 12), (tooth_x + 4, my + 12)])
+
+def draw_fireball(current_time, attack_start_time, attack_duration, start_pos, end_pos, trail):
+    if not attack_start_time:
+        return trail
+    elapsed = current_time - attack_start_time
+    if elapsed < attack_duration and start_pos and end_pos:
+        t = elapsed / attack_duration
+        x = start_pos[0] + (end_pos[0] - start_pos[0]) * t
+        y = start_pos[1] + (end_pos[1] - start_pos[1]) * t
+        trail.append((int(x), int(y)))
+        if len(trail) > 8:
+            trail.pop(0)
+        for i, (tx, ty) in enumerate(trail):
+            size = 12 - i
+            if size > 0:
+                color = (255, 100 + i * 10, 0)
+                pygame.draw.circle(screen, color, (tx, ty), size)
+        pygame.draw.circle(screen, (255, 200, 50), (int(x), int(y)), 14)
+        pygame.draw.circle(screen, (255, 120, 0), (int(x), int(y)), 10)
+        pygame.draw.circle(screen, (255, 255, 150), (int(x), int(y)), 5)
+    else:
+        trail = []
+    return trail
+
+# ---------- Diccionari de traduccions (versió compacta) ----------
+texts = {
+    "Català": {
+        "play": "COMENÇAR", "dictionary": "DICCIONARI", "exit": "SORTIR", "subtitle": "Aprèn llenguatge de signes jugant!",
+        "dict_title": "DICCIONARI DE SIGNES", "back": "<- ESC", "options_title": "OPCIONS", "language": "Idioma:",
+        "volume": "Volum:", "difficulty": "Dificultat:", "easy": "Fàcil", "normal": "Normal", "hard": "Difícil",
+        "battle_title": "BATALLA DE SIGNES", "player": "Jugador", "monster": "Monstre", "hp": "PV",
+        "do_gesture": "Fes:", "next_attack": "Pròxim atac enemic:", "webcam_not_found": "Webcam no detectada",
+        "demo_text": "(Demo: prem ESPAI per fer el gest correcte)", "victory": "VICTÒRIA!", "defeat": "DERROTA!",
+        "continue_text": "Prem ESC per sortir o qualsevol tecla per tornar al menú",
+        "ALFABET": "ALFABET", "NÚMEROS": "NÚMEROS", "score": "Puntuació", "combo": "Combo x", "high_score": "Rècord",
+        "pause": "PAUSA - Prem P per continuar", "tutorial": "Fes el gest que apareix a dalt i prem ESPAI per atacar!",
+        "powerup": "Power-up! +10 PV", "gesture_types": "Tipus de gestos:", "letters": "Lletres", "numbers": "Números",
+        "desc_A": "Mà en puny, polze amunt", "desc_B": "Mà plana, dits junts", "desc_C": "Mà en forma de C", "desc_D": "Índex estès",
+        "desc_E": "Dits corbats", "desc_F": "Cercle polze-índex", "desc_G": "Índex horitzontal", "desc_H": "Índex i mig horitzontals",
+        "desc_I": "Dit petit estès", "desc_L": "Pistola", "desc_O": "Dits en cercle", "desc_P": "Mà oberta",
+        "desc_Q": "Índex avall", "desc_R": "Índex i mig creuats", "desc_S": "Puny tancat", "desc_T": "Polze entre dits",
+        "desc_U": "Índex i mig units", "desc_V": "V", "desc_W": "Tres dits", "desc_Y": "Polze i petit estesos",
+        "desc_0": "Puny", "desc_1": "Índex", "desc_2": "Índex i mig", "desc_3": "Polze, índex i mig", "desc_4": "Quatre dits",
+        "desc_5": "Mà oberta", "desc_6": "Polze i petit", "desc_7": "Tres dits junts", "desc_8": "Índex i polze estesos", "desc_9": "Índex corbat",
+    },
+    "Español": {
+        "play": "COMENZAR", "dictionary": "DICCIONARIO", "exit": "SALIR", "subtitle": "¡Aprende lenguaje de signos jugando!",
+        "dict_title": "DICCIONARIO DE SIGNOS", "back": "<- ESC", "options_title": "OPCIONES", "language": "Idioma:",
+        "volume": "Volumen:", "difficulty": "Dificultad:", "easy": "Fácil", "normal": "Normal", "hard": "Difícil",
+        "battle_title": "BATALLA DE SIGNOS", "player": "Jugador", "monster": "Monstruo", "hp": "PV",
+        "do_gesture": "Haz:", "next_attack": "Próximo ataque enemigo:", "webcam_not_found": "Webcam no detectada",
+        "demo_text": "(Demo: presiona ESPACIO para hacer el gesto correcto)", "victory": "¡VICTORIA!", "defeat": "¡DERROTA!",
+        "continue_text": "Presiona ESC para salir o cualquier tecla para volver al menú",
+        "ALFABET": "ALFABETO", "NÚMEROS": "NÚMEROS", "score": "Puntuación", "combo": "Combo x", "high_score": "Récord",
+        "pause": "PAUSA - Presiona P para continuar", "tutorial": "¡Haz el gesto que aparece arriba y presiona ESPACIO para atacar!",
+        "powerup": "¡Power-up! +10 PV", "gesture_types": "Tipos de gestos:", "letters": "Letras", "numbers": "Números",
+        "desc_A": "Puño, pulgar arriba", "desc_B": "Mano plana", "desc_C": "Forma de C", "desc_D": "Índice extendido",
+        "desc_E": "Dedos curvados", "desc_F": "Círculo pulgar-índice", "desc_G": "Índice horizontal", "desc_H": "Índice y medio horizontales",
+        "desc_I": "Meñique extendido", "desc_L": "Pistola", "desc_O": "Dedos en círculo", "desc_P": "Mano abierta",
+        "desc_Q": "Índice abajo", "desc_R": "Índice y medio cruzados", "desc_S": "Puño cerrado", "desc_T": "Pulgar entre dedos",
+        "desc_U": "Índice y medio juntos", "desc_V": "V", "desc_W": "Tres dedos", "desc_Y": "Pulgar y meñique extendidos",
+        "desc_0": "Puño", "desc_1": "Índice", "desc_2": "Índice y medio", "desc_3": "Pulgar, índice y medio", "desc_4": "Cuatro dedos",
+        "desc_5": "Mano abierta", "desc_6": "Pulgar y meñique", "desc_7": "Tres dedos juntos", "desc_8": "Índice y pulgar extendidos", "desc_9": "Índice curvado",
+    },
+    "English": {
+        "play": "PLAY", "dictionary": "DICTIONARY", "exit": "EXIT", "subtitle": "Learn sign language while playing!",
+        "dict_title": "SIGN LANGUAGE DICTIONARY", "back": "<- ESC", "options_title": "OPTIONS", "language": "Language:",
+        "volume": "Volume:", "difficulty": "Difficulty:", "easy": "Easy", "normal": "Normal", "hard": "Hard",
+        "battle_title": "SIGN BATTLE", "player": "Player", "monster": "Monster", "hp": "HP",
+        "do_gesture": "Do:", "next_attack": "Next enemy attack:", "webcam_not_found": "Webcam not detected",
+        "demo_text": "(Demo: press SPACE to perform the correct gesture)", "victory": "VICTORY!", "defeat": "DEFEAT!",
+        "continue_text": "Press ESC to exit or any key to return to menu",
+        "ALFABET": "ALPHABET", "NÚMEROS": "NUMBERS", "score": "Score", "combo": "Combo x", "high_score": "Record",
+        "pause": "PAUSE - Press P to continue", "tutorial": "Make the gesture shown above and press SPACE to attack!",
+        "powerup": "Power-up! +10 HP", "gesture_types": "Gesture types:", "letters": "Letters", "numbers": "Numbers",
+        "desc_A": "Fist, thumb up", "desc_B": "Flat hand", "desc_C": "C shape", "desc_D": "Index up",
+        "desc_E": "Curved fingers", "desc_F": "Circle thumb-index", "desc_G": "Index horizontal", "desc_H": "Index and middle horizontal",
+        "desc_I": "Little finger up", "desc_L": "L shape", "desc_O": "Fingers circle", "desc_P": "Open hand",
+        "desc_Q": "Index down", "desc_R": "Index and middle crossed", "desc_S": "Closed fist", "desc_T": "Thumb between fingers",
+        "desc_U": "Index and middle together", "desc_V": "V", "desc_W": "Three fingers", "desc_Y": "Thumb and little up",
+        "desc_0": "Fist", "desc_1": "Index", "desc_2": "Index and middle", "desc_3": "Thumb, index, middle", "desc_4": "Four fingers",
+        "desc_5": "Open hand", "desc_6": "Thumb and little", "desc_7": "Three fingers together", "desc_8": "Index and thumb out", "desc_9": "Index bent",
+    },
+    "Deutsch": {
+        "play": "START", "dictionary": "WÖRTERBUCH", "exit": "BEENDEN", "subtitle": "Lerne Gebärdensprache spielend!",
+        "dict_title": "GEBÄRDENSPRACHE-WÖRTERBUCH", "back": "<- ESC", "options_title": "OPTIONEN", "language": "Sprache:",
+        "volume": "Lautstärke:", "difficulty": "Schwierigkeit:", "easy": "Einfach", "normal": "Normal", "hard": "Schwer",
+        "battle_title": "GEBÄRDEN-SCHLACHT", "player": "Spieler", "monster": "Monster", "hp": "KP",
+        "do_gesture": "Mach:", "next_attack": "Nächster Angriff:", "webcam_not_found": "Webcam nicht erkannt",
+        "demo_text": "(Demo: Drücke LEERTASTE für die richtige Geste)", "victory": "SIEG!", "defeat": "NIEDERLAGE!",
+        "continue_text": "Drücke ESC zum Beenden oder eine beliebige Taste fürs Menü",
+        "ALFABET": "ALPHABET", "NÚMEROS": "ZAHLEN", "score": "Punktzahl", "combo": "Kombox", "high_score": "Rekord",
+        "pause": "PAUSE - Drücke P zum Fortsetzen", "tutorial": "Mache die oben gezeigte Geste und drücke LEERTASTE zum Angriff!",
+        "powerup": "Power-up! +10 KP", "gesture_types": "Gestentypen:", "letters": "Buchstaben", "numbers": "Zahlen",
+        "desc_A": "Faust, Daumen hoch", "desc_B": "Flache Hand", "desc_C": "C-Form", "desc_D": "Zeigefinger hoch",
+        "desc_E": "Gekrümmte Finger", "desc_F": "Kreis Daumen-Zeigefinger", "desc_G": "Zeigefinger waagerecht", "desc_H": "Zeige- und Mittelfinger waagerecht",
+        "desc_I": "Kleiner Finger hoch", "desc_L": "L-Form", "desc_O": "Finger im Kreis", "desc_P": "Offene Hand",
+        "desc_Q": "Zeigefinger runter", "desc_R": "Zeige- und Mittelfinger gekreuzt", "desc_S": "Geschlossene Faust", "desc_T": "Daumen zwischen Fingern",
+        "desc_U": "Zeige- und Mittelfinger zusammen", "desc_V": "V", "desc_W": "Drei Finger", "desc_Y": "Daumen und kleiner Finger hoch",
+        "desc_0": "Faust", "desc_1": "Zeigefinger", "desc_2": "Zeige- und Mittelfinger", "desc_3": "Daumen, Zeige-, Mittelfinger", "desc_4": "Vier Finger",
+        "desc_5": "Offene Hand", "desc_6": "Daumen und kleiner Finger", "desc_7": "Drei Finger zusammen", "desc_8": "Zeigefinger und Daumen aus", "desc_9": "Zeigefinger gekrümmt",
+    }
+}
+
+def get_text(key):
+    return texts[idioma].get(key, key)
+
+# ---------- Pantalles ----------
+def main_menu():
+    global high_score
+    btn_play = Button(WIDTH//2 - 150, HEIGHT//2 - 60, 300, 70, get_text("play"), BLUE)
+    btn_dict = Button(WIDTH//2 - 150, HEIGHT//2 + 30, 300, 70, get_text("dictionary"), (100,200,100))
+    btn_exit = Button(WIDTH//2 - 150, HEIGHT//2 + 120, 300, 70, get_text("exit"), RED)
+
+    background = pygame.Surface((WIDTH, HEIGHT))
+    background.fill((20,30,50))
+
+    logo_y = 20
+    if logo_img:
+        logo_x = WIDTH//2 - logo_img.get_width()//2
+    else:
+        logo_x = WIDTH//2 - 100
+
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return "exit"
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if btn_play.is_clicked(event.pos):
+                    return "play"
+                elif btn_dict.is_clicked(event.pos):
+                    return "dictionary"
+                elif btn_exit.is_clicked(event.pos):
+                    return "exit"
+                if event.pos[0] < 60 and event.pos[1] < 60:
+                    return "settings"
+
+        screen.blit(background, (0,0))
+        if logo_img:
+            screen.blit(logo_img, (logo_x, logo_y))
+        else:
+            pygame.draw.rect(screen, DARK_GRAY, (logo_x, logo_y, 200,100), border_radius=15)
+            placeholder = font_medium.render("LOGO", True, WHITE)
+            screen.blit(placeholder, (logo_x+100-placeholder.get_width()//2, logo_y+50-placeholder.get_height()//2))
+
+        high_score_text = font_small.render(f"{get_text('high_score')}: {high_score}", True, YELLOW)
+        screen.blit(high_score_text, (WIDTH-200,20))
+
+        logo_h = logo_img.get_height() if logo_img else 100
+        subtitle_y = logo_y + logo_h + 20
+        subtitle = font_small.render(get_text("subtitle"), True, (200,200,200))
+        screen.blit(subtitle, (WIDTH//2 - subtitle.get_width()//2, subtitle_y))
+
+        btn_play.draw(screen)
+        btn_dict.draw(screen)
+        btn_exit.draw(screen)
+        draw_settings_icon(10,10,40)
+        pygame.display.flip()
+        clock.tick(60)
+    return "exit"
+
+def settings_menu():
+    global idioma, volum, dificultat, use_letters, use_numbers
+    idiomes = ["Català","Español","English","Deutsch"]
+    dificultats = ["Fàcil","Normal","Difícil"]
+    diff_texts = [get_text("easy"), get_text("normal"), get_text("hard")]
+
+    btn_width = 90
+    btn_height = 40
+    spacing = 20
+    total_idiomes = len(idiomes)*btn_width + (len(idiomes)-1)*spacing
+    start_x_idiomes = WIDTH//2 - total_idiomes//2
+
+    y_idioma_label = HEIGHT//2 - 180
+    y_idioma_btns = y_idioma_label + 50
+    y_volum_label = HEIGHT//2 - 60
+    y_slider = y_volum_label + 40
+    y_dificultat_label = HEIGHT//2 + 60
+    y_dificultat_btns = y_dificultat_label + 50
+    gesture_label_y = y_dificultat_btns + 60
+    checkbox_size = 30
+    letters_checkbox = pygame.Rect(WIDTH//2 - 120, gesture_label_y+40, checkbox_size, checkbox_size)
+    numbers_checkbox = pygame.Rect(WIDTH//2 + 20, gesture_label_y+40, checkbox_size, checkbox_size)
+
+    slider_rect = pygame.Rect(WIDTH//2 - 150, y_slider, 300, 10)
+
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                save_config()
+                return
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if slider_rect.collidepoint(event.pos):
+                    volum = int((event.pos[0]-slider_rect.x)/slider_rect.width*100)
+                    volum = max(0,min(100,volum))
+                    update_all_volumes()
+                for i, lang in enumerate(idiomes):
+                    btn_rect = pygame.Rect(start_x_idiomes + i*(btn_width+spacing), y_idioma_btns, btn_width, btn_height)
+                    if btn_rect.collidepoint(event.pos):
+                        idioma = lang
+                        diff_texts = [get_text("easy"), get_text("normal"), get_text("hard")]
+                total_dif = len(dificultats)*btn_width + (len(dificultats)-1)*spacing
+                start_x_dif = WIDTH//2 - total_dif//2
+                for i, diff in enumerate(dificultats):
+                    btn_rect = pygame.Rect(start_x_dif + i*(btn_width+spacing), y_dificultat_btns, btn_width, btn_height)
+                    if btn_rect.collidepoint(event.pos):
+                        dificultat = diff
+                if letters_checkbox.collidepoint(event.pos):
+                    use_letters = not use_letters
+                if numbers_checkbox.collidepoint(event.pos):
+                    use_numbers = not use_numbers
+                if event.pos[0] < 100 and event.pos[1] < 60:
+                    save_config()
+                    return
+
+        screen.fill((20,20,40))
+        title = font_large.render(get_text("options_title"), True, WHITE)
+        screen.blit(title, (WIDTH//2 - title.get_width()//2, 40))
+
+        lang_label = font_medium.render(get_text("language"), True, WHITE)
+        screen.blit(lang_label, (WIDTH//2 - lang_label.get_width()//2, y_idioma_label))
+        for i, lang in enumerate(idiomes):
+            btn_color = DARK_BLUE if lang == idioma else GRAY
+            btn_rect = pygame.Rect(start_x_idiomes + i*(btn_width+spacing), y_idioma_btns, btn_width, btn_height)
+            pygame.draw.rect(screen, btn_color, btn_rect, border_radius=8)
+            pygame.draw.rect(screen, WHITE, btn_rect, 2, border_radius=8)
+            text = font_small.render(lang, True, WHITE)
+            screen.blit(text, (btn_rect.x + (btn_width-text.get_width())//2, btn_rect.y+8))
+
+        vol_label = font_medium.render(f"{get_text('volume')} {volum}%", True, WHITE)
+        screen.blit(vol_label, (WIDTH//2 - vol_label.get_width()//2, y_volum_label))
+        pygame.draw.rect(screen, GRAY, slider_rect, border_radius=5)
+        fill_w = int((volum/100)*slider_rect.width)
+        fill_rect = pygame.Rect(slider_rect.x, slider_rect.y, fill_w, slider_rect.height)
+        pygame.draw.rect(screen, BLUE, fill_rect, border_radius=5)
+        knob_x = slider_rect.x + fill_w - 8
+        knob_rect = pygame.Rect(knob_x, slider_rect.y-8, 16, 26)
+        pygame.draw.rect(screen, WHITE, knob_rect, border_radius=8)
+
+        diff_label = font_medium.render(get_text("difficulty"), True, WHITE)
+        screen.blit(diff_label, (WIDTH//2 - diff_label.get_width()//2, y_dificultat_label))
+        total_dif = len(dificultats)*btn_width + (len(dificultats)-1)*spacing
+        start_x_dif = WIDTH//2 - total_dif//2
+        for i, diff in enumerate(dificultats):
+            btn_color = DARK_BLUE if diff == dificultat else GRAY
+            btn_rect = pygame.Rect(start_x_dif + i*(btn_width+spacing), y_dificultat_btns, btn_width, btn_height)
+            pygame.draw.rect(screen, btn_color, btn_rect, border_radius=8)
+            pygame.draw.rect(screen, WHITE, btn_rect, 2, border_radius=8)
+            text = font_small.render(diff_texts[i], True, WHITE)
+            screen.blit(text, (btn_rect.x + (btn_width-text.get_width())//2, btn_rect.y+8))
+
+        gesture_label = font_medium.render(get_text("gesture_types"), True, WHITE)
+        screen.blit(gesture_label, (WIDTH//2 - gesture_label.get_width()//2, gesture_label_y))
+        pygame.draw.rect(screen, WHITE, letters_checkbox, 2, border_radius=3)
+        if use_letters:
+            pygame.draw.line(screen, GREEN, (letters_checkbox.x+5, letters_checkbox.y+15), (letters_checkbox.x+12, letters_checkbox.y+22), 3)
+            pygame.draw.line(screen, GREEN, (letters_checkbox.x+12, letters_checkbox.y+22), (letters_checkbox.x+22, letters_checkbox.y+8), 3)
+        letters_text = font_small.render(get_text("letters"), True, WHITE)
+        screen.blit(letters_text, (letters_checkbox.x+checkbox_size+10, letters_checkbox.y+5))
+        pygame.draw.rect(screen, WHITE, numbers_checkbox, 2, border_radius=3)
+        if use_numbers:
+            pygame.draw.line(screen, GREEN, (numbers_checkbox.x+5, numbers_checkbox.y+15), (numbers_checkbox.x+12, numbers_checkbox.y+22), 3)
+            pygame.draw.line(screen, GREEN, (numbers_checkbox.x+12, numbers_checkbox.y+22), (numbers_checkbox.x+22, numbers_checkbox.y+8), 3)
+        numbers_text = font_small.render(get_text("numbers"), True, WHITE)
+        screen.blit(numbers_text, (numbers_checkbox.x+checkbox_size+10, numbers_checkbox.y+5))
+
+        pygame.draw.rect(screen, GRAY, (10,10,80,40), border_radius=10)
+        back_text = font_small.render(get_text("back"), True, WHITE)
+        screen.blit(back_text, (15,18))
+        pygame.display.flip()
+        clock.tick(60)
+
+def dictionary():
+    alphabet = [chr(ord('A')+i) for i in range(26)]
+    numbers = [str(i) for i in range(10)]
+    categories = [
+        {"title_key": "ALFABET", "open": False, "signs": [{"word": l, "desc_key": f"desc_{l}"} for l in alphabet]},
+        {"title_key": "NÚMEROS", "open": False, "signs": [{"word": n, "desc_key": f"desc_{n}"} for n in numbers]}
+    ]
+    search_text = ""
+    search_active = False
+    cursor_visible = True
+    cursor_timer = 0
+    search_bar = pygame.Rect(120,80,300,36)
+    clear_btn = pygame.Rect(430,80,36,36)
+    scroll = 0
+    SCROLL_SPEED = 30
+    CAT_H = 45
+    CARD_H = 80
+    running = True
+    while running:
+        mouse_pos = pygame.mouse.get_pos()
+        dt = clock.tick(60)
+        cursor_timer += dt
+        if cursor_timer > 500:
+            cursor_visible = not cursor_visible
+            cursor_timer = 0
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                return
+            if event.type == pygame.KEYDOWN and search_active:
+                if event.key == pygame.K_BACKSPACE:
+                    search_text = search_text[:-1]
+                    if not search_text:
+                        search_active = False
+                elif event.unicode and event.unicode.isprintable():
+                    search_text += event.unicode
+                    search_active = True
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    if clear_btn.collidepoint(event.pos):
+                        search_text = ""
+                        search_active = False
+                    elif search_bar.collidepoint(event.pos):
+                        search_active = True
+                    else:
+                        search_active = False
+                    if not search_text:
+                        y = 150 - scroll
+                        for cat in categories:
+                            title_rect = pygame.Rect(80, y, WIDTH-160, CAT_H)
+                            if title_rect.collidepoint(event.pos):
+                                cat["open"] = not cat["open"]
+                            y += CAT_H
+                            if cat["open"]:
+                                y += len(cat["signs"]) * CARD_H
+                elif event.button == 4:
+                    scroll = max(0, scroll - SCROLL_SPEED)
+                elif event.button == 5:
+                    if search_text:
+                        results = [s for c in categories for s in c["signs"] if search_text.lower() in s["word"].lower()]
+                        total_h = 120 + len(results)*CARD_H
+                    else:
+                        total_h = 150
+                        for c in categories:
+                            total_h += CAT_H
+                            if c["open"]:
+                                total_h += len(c["signs"])*CARD_H
+                    max_scroll = max(0, total_h - HEIGHT + 100)
+                    scroll = min(max_scroll, scroll + SCROLL_SPEED)
+
+        screen.fill((30,30,50))
+        title = font_large.render(get_text("dict_title"), True, WHITE)
+        screen.blit(title, (WIDTH//2 - title.get_width()//2, 20))
+        pygame.draw.rect(screen, (50,50,70), search_bar, border_radius=8)
+        pygame.draw.rect(screen, WHITE, search_bar, 2, border_radius=8)
+        search_surf = font_small.render(search_text + ("|" if search_active and cursor_visible else ""), True, WHITE)
+        screen.blit(search_surf, (search_bar.x+8, search_bar.y+8))
+        if not search_text and not search_active:
+            placeholder = font_small.render("Cerca...", True, GRAY)
+            screen.blit(placeholder, (search_bar.x+8, search_bar.y+8))
+        pygame.draw.circle(screen, RED, clear_btn.center, 18)
+        pygame.draw.circle(screen, WHITE, clear_btn.center, 18, 2)
+        clear_text = font_small.render("X", True, WHITE)
+        screen.blit(clear_text, (clear_btn.x+12, clear_btn.y+8))
+
+        y = 150 - scroll
+        if search_text:
+            results = [s for c in categories for s in c["signs"] if search_text.lower() in s["word"].lower()]
+            for sign in results:
+                if y+CARD_H > 60 and y < HEIGHT:
+                    card = pygame.Rect(100, y, WIDTH-200, CARD_H)
+                    pygame.draw.rect(screen, (50,50,70), card, border_radius=10)
+                    pygame.draw.rect(screen, BLUE, card, 2, border_radius=10)
+                    word_surf = font_medium.render(sign["word"], True, (255,215,0))
+                    screen.blit(word_surf, (120, y+15))
+                    desc_surf = font_small.render(get_text(sign["desc_key"]), True, WHITE)
+                    screen.blit(desc_surf, (120, y+50))
+                y += CARD_H
+        else:
+            for cat in categories:
+                title_rect = pygame.Rect(80, y, WIDTH-160, CAT_H)
+                if title_rect.collidepoint(mouse_pos):
+                    pygame.draw.rect(screen, (100,160,210), title_rect, border_radius=8)
+                else:
+                    pygame.draw.rect(screen, (70,130,180), title_rect, border_radius=8)
+                pygame.draw.rect(screen, WHITE, title_rect, 2, border_radius=8)
+                icon = "▼" if cat["open"] else "▶"
+                icon_surf = font_medium.render(icon, True, WHITE)
+                screen.blit(icon_surf, (title_rect.x+15, title_rect.y+8))
+                cat_surf = font_medium.render(get_text(cat["title_key"]), True, WHITE)
+                screen.blit(cat_surf, (title_rect.x+45, title_rect.y+8))
+                y += CAT_H
+                if cat["open"]:
+                    for sign in cat["signs"]:
+                        if y+CARD_H > 60 and y < HEIGHT:
+                            card = pygame.Rect(100, y, WIDTH-200, CARD_H)
+                            pygame.draw.rect(screen, (50,50,70), card, border_radius=10)
+                            pygame.draw.rect(screen, BLUE, card, 2, border_radius=10)
+                            word_surf = font_medium.render(sign["word"], True, (255,215,0))
+                            screen.blit(word_surf, (120, y+15))
+                            desc_surf = font_small.render(get_text(sign["desc_key"]), True, WHITE)
+                            screen.blit(desc_surf, (120, y+50))
+                        y += CARD_H
+
+        pygame.draw.rect(screen, GRAY, (10,10,80,40), border_radius=10)
+        back_text = font_small.render(get_text("back"), True, WHITE)
+        screen.blit(back_text, (15,18))
+        pygame.display.flip()
+        clock.tick(60)
+
+# ---------- Joc principal (amb retroalimentació visual) ----------
+def game_loop():
+    global webcam, dificultat, volum, high_score, use_letters, use_numbers, MODE_DEMO, detector_mans
+
+    if webcam is None or not webcam.isOpened():
+        webcam = cv2.VideoCapture(0)
+
+    # Llista de gestos
+    gestors_detectables = ["A","B","C","D","E","F","G","H","I","L","O","P","Q","R","S","T","U","V","W","Y"]
+    all_gestures = []
+    if use_letters:
+        all_gestures.extend(gestors_detectables)
+    if use_numbers:
+        all_gestures.extend([str(i) for i in range(10)])
+    if not all_gestures:
+        all_gestures = gestors_detectables + [str(i) for i in range(10)]
+
+    current_gesture = random.choice(all_gestures)
+    sistema = SistemaJocUniversal()
+    sistema.iniciar_nivell(current_gesture)
+
+    player_health = 100
+    max_player_health = 100
+    attack_damage = 20
+
+    # Configuració dificultat (temps de cooldown enemic)
+    if dificultat == "Fàcil":
+        enemy_attack_cooldown = 20.0
+        enemy_damage = 5
+        enemy_health = 100
+        max_enemy_health = 100
+        monster_color = (100,200,100)
+        monster_eye_color = (0,0,0)
+        monster_horn = False
+        monster_scale = False
+    elif dificultat == "Difícil":
+        enemy_attack_cooldown = 10.0
+        enemy_damage = 15
+        enemy_health = 500
+        max_enemy_health = 500
+        monster_color = (150,50,50)
+        monster_eye_color = (255,80,80)
+        monster_horn = True
+        monster_scale = True
+    else:  # Normal
+        enemy_attack_cooldown = 15.0
+        enemy_damage = 10
+        enemy_health = 200
+        max_enemy_health = 200
+        monster_color = (200,130,50)
+        monster_eye_color = (0,0,0)
+        monster_horn = True
+        monster_scale = False
+
+    last_enemy_attack_time = time.time()
+    battle_active = True
+    victory = False
+    last_gesture_time = 0
+
+    score = 0
+    combo = 0
+    consecutive_hits = 0
+    powerup_cooldown = 0
+    last_hit_time = 0
+
+    attack_active = False
+    attack_start_time = 0
+    attack_duration = 0.35
+    fire_trail = []
+    sword_angle = 0
+    sword_animating = False
+
+    floating_texts = []
+    particles = []
+
+    # Variables per al missatge de detecció (nou)
+    detection_msg = ""
+    detection_color = WHITE
+    detection_time = 0
+
+    def play_sound(name):
+        if name in sounds and sounds[name]:
+            sounds[name].play()
+
+    show_tutorial = True
+    tutorial_start_time = 0
+    paused = False
+
+    running = True
+    while running:
+        current_time = time.time()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    if battle_active:
+                        return True
+                if event.key == pygame.K_p and battle_active:
+                    paused = not paused
+
+        if paused:
+            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0,0,0,180))
+            screen.blit(overlay, (0,0))
+            pause_text = font_large.render(get_text("pause"), True, WHITE)
+            screen.blit(pause_text, (WIDTH//2 - pause_text.get_width()//2, HEIGHT//2))
+            pygame.display.flip()
+            clock.tick(30)
+            continue
+
+        # Capturar imatge de la càmera
+        ret, frame = webcam.read()
+        if not ret:
+            continue
+
+        # Detecció de gest si està disponible
+        if not MODE_DEMO and detector_mans is not None:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            results = detector_mans.detect(mp_image)
+            if results.hand_landmarks:
+                hand = results.hand_landmarks[0]
+                msg, color, completed = sistema.actualitzar(hand)
+                # Guardar missatge per mostrar-lo (durant 1 segon)
+                detection_msg = msg
+                detection_color = color
+                detection_time = current_time
+                if completed:
+                    last_gesture_time = current_time
+                    enemy_health -= attack_damage
+                    play_sound("hit")
+                    floating_texts.append(FloatingText(f"-{attack_damage}", (MONSTER_POS[0], MONSTER_POS[1]-30), ORANGE))
+                    for _ in range(8):
+                        particles.append(Particle((MONSTER_POS[0]+random.randint(-30,30), MONSTER_POS[1]+random.randint(-20,20)),
+                                                  (random.uniform(-3,3), random.uniform(-3,3)), (255,100,0), 0.4))
+                    base_points = 10
+                    combo_multiplier = 1 + combo*0.1
+                    points = int(base_points * combo_multiplier)
+                    score += points
+                    floating_texts.append(FloatingText(f"+{points}", (MONSTER_POS[0], MONSTER_POS[1]-50), YELLOW, 0.6))
+                    consecutive_hits += 1
+                    combo = consecutive_hits
+                    last_hit_time = current_time
+                    last_enemy_attack_time = current_time
+                    sword_animating = True
+                    sword_angle = 30
+                    attack_active = True
+                    attack_start_time = current_time
+                    fire_trail = []
+                    if enemy_health <= 0:
+                        enemy_health = 0
+                        battle_active = False
+                        victory = True
+                        play_sound("victory")
+                        if score > high_score:
+                            high_score = score
+                            save_config()
+                    else:
+                        new_gesture = current_gesture
+                        while new_gesture == current_gesture:
+                            new_gesture = random.choice(all_gestures)
+                        current_gesture = new_gesture
+                        sistema.iniciar_nivell(current_gesture)
+            else:
+                # Sense mans detectades
+                sistema.actualitzar(None)
+                # Opcional: esborrar missatge després d'un temps
+                if current_time - detection_time > 1.0:
+                    detection_msg = ""
+        else:
+            # Mode demo: detectar tecla ESPAI
+            keys = pygame.key.get_pressed()
+            if battle_active and keys[pygame.K_SPACE] and current_time - last_gesture_time >= 0.6:
+                last_gesture_time = current_time
+                # Simular que el gest és correcte
+                detection_msg = f"¡GEST CORRECTE! ({current_gesture})"
+                detection_color = GREEN
+                detection_time = current_time
+                enemy_health -= attack_damage
+                play_sound("hit")
+                floating_texts.append(FloatingText(f"-{attack_damage}", (MONSTER_POS[0], MONSTER_POS[1]-30), ORANGE))
+                for _ in range(8):
+                    particles.append(Particle((MONSTER_POS[0]+random.randint(-30,30), MONSTER_POS[1]+random.randint(-20,20)),
+                                              (random.uniform(-3,3), random.uniform(-3,3)), (255,100,0), 0.4))
+                base_points = 10
+                combo_multiplier = 1 + combo*0.1
+                points = int(base_points * combo_multiplier)
+                score += points
+                floating_texts.append(FloatingText(f"+{points}", (MONSTER_POS[0], MONSTER_POS[1]-50), YELLOW, 0.6))
+                consecutive_hits += 1
+                combo = consecutive_hits
+                last_hit_time = current_time
+                last_enemy_attack_time = current_time
+                sword_animating = True
+                sword_angle = 30
+                attack_active = True
+                attack_start_time = current_time
+                fire_trail = []
+                if enemy_health <= 0:
+                    enemy_health = 0
+                    battle_active = False
+                    victory = True
+                    play_sound("victory")
+                    if score > high_score:
+                        high_score = score
+                        save_config()
+                else:
+                    new_gesture = current_gesture
+                    while new_gesture == current_gesture:
+                        new_gesture = random.choice(all_gestures)
+                    current_gesture = new_gesture
+                    sistema.iniciar_nivell(current_gesture)
+            elif current_time - detection_time > 1.0:
+                detection_msg = ""
+
+        # Atac de l'enemic
+        if battle_active and current_time - last_enemy_attack_time >= enemy_attack_cooldown:
+            player_health -= enemy_damage
+            last_enemy_attack_time = current_time
+            play_sound("hit")
+            floating_texts.append(FloatingText(f"-{enemy_damage}", (PLAYER_POS[0], PLAYER_POS[1]-30), RED))
+            for _ in range(5):
+                particles.append(Particle((PLAYER_POS[0]+random.randint(-20,20), PLAYER_POS[1]+random.randint(-20,20)),
+                                          (random.uniform(-2,2), random.uniform(-2,2)), RED, 0.5))
+            if player_health <= 0:
+                player_health = 0
+                battle_active = False
+                victory = False
+                play_sound("defeat")
+                if score > high_score:
+                    high_score = score
+                    save_config()
+
+        # Actualitzar combo
+        if current_time - last_hit_time > 2.0:
+            combo = 0
+            consecutive_hits = 0
+
+        # Power-up
+        if consecutive_hits >= 3 and powerup_cooldown == 0 and battle_active and player_health < max_player_health:
+            powerup_cooldown = 3
+            heal = 10
+            player_health = min(max_player_health, player_health + heal)
+            play_sound("powerup")
+            floating_texts.append(FloatingText(get_text("powerup"), (PLAYER_POS[0], PLAYER_POS[1]-40), GREEN, 1.0))
+            particles.extend([Particle((PLAYER_POS[0]+random.randint(-30,30), PLAYER_POS[1]+random.randint(-20,20)),
+                                       (random.uniform(-2,2), random.uniform(-2,2)), GREEN, 0.5) for _ in range(10)])
+        if powerup_cooldown > 0:
+            powerup_cooldown = max(0, powerup_cooldown - 0.033)
+
+        # Animació espasa
+        if sword_animating:
+            sword_angle -= 10
+            if sword_angle <= -30:
+                sword_animating = False
+
+        # Actualitzar elements visuals
+        floating_texts = [ft for ft in floating_texts if ft.update(current_time)]
+        particles = [p for p in particles if p.update(current_time)]
+
+        # Dibuixar interfície
+        screen.fill((20,20,40))
+        title = font_medium.render(get_text("battle_title"), True, YELLOW)
+        screen.blit(title, (WIDTH//2 - title.get_width()//2, 20))
+
+        draw_health_bar(50,100,400,30, player_health, max_player_health, GREEN)
+        player_text = font_small.render(f"{get_text('player')}: {player_health} {get_text('hp')}", True, WHITE)
+        screen.blit(player_text, (50,70))
+        draw_health_bar(WIDTH-450,100,400,30, enemy_health, max_enemy_health, RED)
+        enemy_text = font_small.render(f"{get_text('monster')}: {enemy_health} {get_text('hp')}", True, WHITE)
+        screen.blit(enemy_text, (WIDTH-450,70))
+
+        score_text = font_small.render(f"{get_text('score')}: {score}", True, YELLOW)
+        screen.blit(score_text, (20,20))
+        if combo > 0:
+            combo_text = font_small.render(f"{get_text('combo')} {combo:.0f}", True, PURPLE)
+            screen.blit(combo_text, (20,50))
+        high_score_text = font_small.render(f"{get_text('high_score')}: {high_score}", True, (200,200,200))
+        screen.blit(high_score_text, (WIDTH-200,20))
+
+        draw_player(sword_angle)
+        flash = current_time - last_gesture_time < 0.1 and battle_active
+        draw_monster(MONSTER_POS, monster_color, monster_eye_color, monster_horn, monster_scale, flash)
+
+        if attack_active:
+            fire_trail = draw_fireball(current_time, attack_start_time, attack_duration,
+                                       PLAYER_POS, MONSTER_POS, fire_trail)
+            if not fire_trail and current_time - attack_start_time >= attack_duration:
+                attack_active = False
+
+        for ft in floating_texts:
+            ft.draw(screen)
+        for p in particles:
+            p.draw(screen)
+
+        # Text del gest a realitzar
+        gesture_text = font_large.render(f"{get_text('do_gesture')} {current_gesture}", True, BLUE)
+        screen.blit(gesture_text, (WIDTH//2 - gesture_text.get_width()//2, HEIGHT//2 - 80))
+
+        # Missatge de detecció (si n'hi ha i és recent)
+        if detection_msg and current_time - detection_time < 1.0:
+            detection_surf = font_small.render(detection_msg, True, detection_color)
+            screen.blit(detection_surf, (WIDTH//2 - detection_surf.get_width()//2, HEIGHT//2 - 40))
+
+        # Comptador pròxim atac
+        time_since_last_attack = current_time - last_enemy_attack_time
+        cooldown_remaining = max(0, enemy_attack_cooldown - time_since_last_attack)
+        if cooldown_remaining > 0 and battle_active:
+            attack_text = font_small.render(f"{get_text('next_attack')} {cooldown_remaining:.1f}s", True, RED)
+            screen.blit(attack_text, (WIDTH//2 - attack_text.get_width()//2, HEIGHT//2 - 20))
+
+        if show_tutorial and battle_active:
+            tutorial_start_time = current_time
+            show_tutorial = False
+        if current_time - tutorial_start_time < 3.0 and not show_tutorial:
+            tutorial_surface = pygame.Surface((WIDTH,60), pygame.SRCALPHA)
+            tutorial_surface.fill((0,0,0,200))
+            screen.blit(tutorial_surface, (0, HEIGHT-80))
+            tutorial_text = font_small.render(get_text("tutorial"), True, WHITE)
+            screen.blit(tutorial_text, (WIDTH//2 - tutorial_text.get_width()//2, HEIGHT-70))
+
+        # Mostrar càmera
+        frame_small = cv2.resize(frame, (320,240))
+        frame_rgb = cv2.cvtColor(frame_small, cv2.COLOR_BGR2RGB)
+        frame_rot = np.rot90(frame_rgb)
+        pygame_frame = pygame.surfarray.make_surface(frame_rot)
+        screen.blit(pygame_frame, WEBCAM_POS)
+
+        demo_text = font_small.render(get_text("demo_text"), True, GRAY)
+        screen.blit(demo_text, (WIDTH//2 - 200, HEIGHT-40))
+
+        if not battle_active:
+            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0,0,0,180))
+            screen.blit(overlay, (0,0))
+            if victory:
+                msg = font_large.render(get_text("victory"), True, GREEN)
+            else:
+                msg = font_large.render(get_text("defeat"), True, RED)
+            screen.blit(msg, (WIDTH//2 - msg.get_width()//2, HEIGHT//2 - 100))
+            continue_text = font_medium.render(get_text("continue_text"), True, WHITE)
+            screen.blit(continue_text, (WIDTH//2 - continue_text.get_width()//2, HEIGHT//2 + 50))
+            pygame.display.flip()
+            waiting = True
+            while waiting:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        return False
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE:
+                            return True
+                        else:
+                            waiting = False
+                            return True
+            return True
+
+        pygame.display.flip()
+        clock.tick(30)
+    return True
+
+# ---------- Punt d'entrada ----------
+def main():
+    while True:
+        action = main_menu()
+        if action == "play":
+            if not game_loop():
+                break
+        elif action == "dictionary":
+            dictionary()
+        elif action == "settings":
+            settings_menu()
+        elif action == "exit":
+            break
+
+    if webcam is not None and webcam.isOpened():
+        webcam.release()
+    if detector_mans is not None:
+        detector_mans.close()
+    cv2.destroyAllWindows()
+    pygame.quit()
+    sys.exit()
+
+if __name__ == "__main__":
+    main()
