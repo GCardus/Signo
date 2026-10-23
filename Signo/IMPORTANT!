@@ -1,7 +1,0 @@
-instal·lar:
-pip install request
-pip install pygame opencv-python pillow numpy
-pip install mediapipe
-pip install scikit-learn
-pip install joblib
-pip install pandas
