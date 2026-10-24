@@ -1,0 +1,225 @@
+import time
+import math
+
+class SistemaJocUniversal:
+    def __init__(self):
+        self.lletra_actual = ""
+        self.missatge_pantalla = ""
+        self.color_text = (0, 255, 255)
+        self.temps_inici_exit = 0
+        self.signe_completat = False
+        
+        # 🛡️ FILTRE DE REBUIG DE SOROLL AVANÇAT
+        self.historial_instantani = []
+        self.MIDA_FILTRE = 10  # Augmentem el filtre per a una estabilitat absoluta
+        self.FOTOGRAMES_REQUERITS = 8  
+        self.lletra_estabilitzada = None
+        self.contador_estabilitat = 0
+
+    def iniciar_nivell(self, lletra):
+        self.lletra_actual = lletra.upper()
+        self.signe_completat = False
+        self.missatge_pantalla = f"FES LA LLETRA: {self.lletra_actual}"
+        self.color_text = (0, 255, 255)
+        self.contador_estabilitat = 0
+        self.lletra_estabilitzada = None
+        self.historial_instantani.clear()
+
+    def calcular_distancia_2d(self, p1, p2):
+        return math.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2)
+
+    def calcular_angle_3d(self, p_base, p_articulacio, p_punta):
+        """Calcula l'angle anatòmic real (en graus) d'una articulació utilitzant vectors normats"""
+        try:
+            ba_x, ba_y, ba_z = p_base.x - p_articulacio.x, p_base.y - p_articulacio.y, p_base.z - p_articulacio.z
+            pa_x, pa_y, pa_z = p_punta.x - p_articulacio.x, p_punta.y - p_articulacio.y, p_punta.z - p_articulacio.z
+            escalar = ba_x * pa_x + ba_y * pa_y + ba_z * pa_z
+            mag_ba = math.sqrt(ba_x**2 + ba_y**2 + ba_z**2)
+            mag_pa = math.sqrt(pa_x**2 + pa_y**2 + pa_z**2)
+            if mag_ba == 0 or mag_pa == 0: return 180
+            cos_theta = max(-1.0, min(1.0, escalar / (mag_ba * mag_pa)))
+            return math.degrees(math.acos(cos_theta))
+        except:
+            return 180
+
+    def actualitzar(self, results_cos, results_mans):
+        ara = time.time()
+
+        if self.signe_completat:
+            if ara - self.temps_inici_exit < 2.5:
+                return f"¡EXCEL-LENT! LLETRA {self.lletra_actual}", (0, 255, 0), True
+            else:
+                self.iniciar_nivell(self.lletra_actual)
+
+        lletra_frame = None
+
+        if results_mans.hand_landmarks:
+            for hand_landmarks in results_mans.hand_landmarks:
+                pts = hand_landmarks
+                
+                # 📏 1. UNITAT DE MESURA DINÀMICA DEL PALMELL (S'adapta a la distància)
+                # Calculem la diagonal del palmell usant el canell (0) i els artells extrems (5 i 17)
+                mida_palmell = (self.calcular_distancia_2d(pts[0], pts[9]) + 
+                                self.calcular_distancia_2d(pts[5], pts[17])) / 2.0
+                if mida_palmell == 0: mida_palmell = 0.01
+
+                # 📐 2. ANÀLISI INTEGRAL DE FLEXIÓ (Anàlisi de les 3 articulacions per dit)
+                # ÍNDEX: Articulations 5-6-7 i 6-7-8
+                ang_idx_1 = self.calcular_angle_3d(pts[5], pts[6], pts[7])
+                ang_idx_2 = self.calcular_angle_3d(pts[6], pts[7], pts[8])
+                idx_recte = ang_idx_1 > 145 and ang_idx_2 > 145
+                idx_tancat = ang_idx_1 < 110 and ang_idx_2 < 110
+
+                # MIG: Articulations 9-10-11 i 10-11-12
+                ang_mig_1 = self.calcular_angle_3d(pts[9], pts[10], pts[11])
+                ang_mig_2 = self.calcular_angle_3d(pts[10], pts[11], pts[12])
+                mig_recte = ang_mig_1 > 145 and ang_mig_2 > 145
+                mig_tancat = ang_mig_1 < 110 and ang_mig_2 < 110
+
+                # ANULAR: Articulations 13-14-15 i 14-15-16
+                ang_anu_1 = self.calcular_angle_3d(pts[13], pts[14], pts[15])
+                ang_anu_2 = self.calcular_angle_3d(pts[14], pts[15], pts[16])
+                anu_recte = ang_anu_1 > 145 and ang_anu_2 > 145
+                anu_tancat = ang_anu_1 < 110 and ang_anu_2 < 110
+
+                # PETIT: Articulations 17-18-19 i 18-19-20
+                ang_pet_1 = self.calcular_angle_3d(pts[17], pts[18], pts[19])
+                ang_pet_2 = self.calcular_angle_3d(pts[18], pts[19], pts[20])
+                pet_recte = ang_pet_1 > 145 and ang_pet_2 > 145
+                pet_tancat = ang_pet_1 < 110 and ang_pet_2 < 110
+
+                # POLZE: Articulations 2-3-4 i obertura respecte a la mà
+                ang_polze = self.calcular_angle_3d(pts[2], pts[3], pts[4])
+                polze_separat = (self.calcular_distancia_2d(pts[4], pts[5]) / mida_palmell) > 0.65
+                polze_recte = ang_polze > 150
+
+                # 🌐 3. ORIENTACIÓ VECTORIAL (Saber exactament cap a on miren els dits)
+                index_es_horitzontal = abs(pts[8].x - pts[5].x) > abs(pts[8].y - pts[5].y)
+                index_apunta_avall = pts[8].y > pts[5].y
+
+                # -------------------------------------------------------------
+                # 🔤 LOGICA DE RECEPTES FILTRADA SENSE MOVIMENT (21 Punts)
+                # -------------------------------------------------------------
+                
+                # A: Puny compacte, tots els dits tancats cap a dins, polze al costat
+                if idx_tancat and mig_tancat and anu_tancat and pet_tancat and not polze_separat:
+                    if self.calcular_distancia_2d(pts[4], pts[10]) > (mida_palmell * 0.4):
+                        lletra_frame = "A"
+                
+                # B: Mà plana, els 4 dits llargs perfectament rectes i junts
+                elif idx_recte and mig_recte and anu_recte and pet_recte and not polze_separat:
+                    lletra_frame = "B"
+                
+                # C: Mà en forma d'urpa o semicercle (Totes les articulacions en posició mitjana)
+                elif (110 <= ang_idx_1 <= 140) and (110 <= ang_mig_1 <= 140) and polze_separat:
+                    lletra_frame = "C"
+
+                # D: Només l'índex recte cap amunt, els altres tres completament doblegats
+                elif idx_recte and mig_tancat and anu_tancat and pet_tancat and not polze_separat:
+                    lletra_frame = "D"
+
+                # E: Dits arronsats amb les puntes tocant gairebé la part superior del palmell
+                elif (60 < ang_idx_1 < 100) and (60 < ang_mig_1 < 100) and not polze_separat:
+                    if pts[8].y < pts[5].y: 
+                        lletra_frame = "E"
+
+                # F: El dit índex es tanca fent un cercle amb el polze, els altres 3 estirats
+                elif idx_tancat and mig_recte and anu_recte and pet_recte:
+                    if self.calcular_distancia_2d(pts[8], pts[4]) < (mida_palmell * 0.4):
+                        lletra_frame = "F"
+
+                # G: L'índex estirat horitzontalment cap al costat, els altres tancats
+                elif idx_recte and mig_tancat and anu_tancat and pet_tancat and index_es_horitzontal:
+                    lletra_frame = "G"
+
+                # H: Índex i mig estirats junts horitzontalment cap al costat
+                elif idx_recte and mig_recte and anu_tancat and pet_tancat and index_es_horitzontal:
+                    lletra_frame = "H"
+
+                # I: Només el dit petit totalment recte cap amunt, els altres 3 tancats
+                elif pet_recte and idx_tancat and mig_tancat and anu_tancat:
+                    lletra_frame = "I"
+
+                # L: Forma de pistola perfecta (Índex recte en vertical, polze obert a 90°)
+                elif idx_recte and polze_separat and mig_tancat and anu_tancat and pet_tancat:
+                    lletra_frame = "L"
+
+                # O: Tots els dits corbats tancant una esfera rodona perfecte amb el polze
+                elif idx_tancat and mig_tancat and anu_tancat and pet_tancat:
+                    dist_index_polze = self.calcular_distancia_2d(pts[8], pts[4])
+                    dist_petit_polze = self.calcular_distancia_2d(pts[20], pts[4])
+                    if dist_index_polze < (mida_palmell * 0.45) and dist_petit_polze < (mida_palmell * 0.6):
+                        lletra_frame = "O"
+
+                # P: Mà totalment oberta (Els 5 dits estirats i separats de forma radial)
+                elif idx_recte and mig_recte and anu_recte and pet_recte and polze_separat:
+                    lletra_frame = "P"
+
+                # Q: Dit índex apuntant directament cap avall de forma vertical
+                elif idx_recte and index_apunta_avall and mig_tancat and anu_tancat and pet_tancat:
+                    lletra_frame = "Q"
+
+                # R: Índex i mig rectes però superposats o creuats entre si
+                elif idx_recte and mig_recte and anu_tancat and pet_tancat:
+                    if self.calcular_distancia_2d(pts[8], pts[12]) < (mida_palmell * 0.22):
+                        lletra_frame = "R"
+
+                # S: Puny tancat amb el polze creuat per davant tapant els artells
+                elif idx_tancat and mig_tancat and anu_tancat and pet_tancat:
+                    if self.calcular_distancia_2d(pts[4], pts[10]) < (mida_palmell * 0.35):
+                        lletra_frame = "S"
+
+                # T: El polze es col·loca just darrere o davall de l'índex doblegat
+                elif idx_tancat and mig_tancat and anu_tancat and pet_tancat:
+                    if pts[4].y < pts[8].y and abs(pts[4].x - pts[6].x) < 0.05:
+                        lletra_frame = "T"
+
+                # U: Índex i mig estirats amunt completament enganxats (Paral·lels i units)
+                elif idx_recte and mig_recte and anu_tancat and pet_tancat:
+                    if self.calcular_distancia_2d(pts[8], pts[12]) < (mida_palmell * 0.35):
+                        lletra_frame = "U"
+
+                # V: Índex i mig estirats formant el símbol clàssic de la "V" (Oberts i separats)
+                elif idx_recte and mig_recte and anu_tancat and pet_tancat:
+                    if self.calcular_distancia_2d(pts[8], pts[12]) >= (mida_palmell * 0.35):
+                        lletra_frame = "V"
+
+                # W: Tres dits rectes enlaire (Índex, Mig, Anular), dit petit tancat
+                elif idx_recte and mig_recte and anu_recte and not pet_recte:
+                    lletra_frame = "W"
+
+                # Y: Dit petit i polze estirats als extrems, els tres del mig tancats
+                elif pet_recte and polze_separat and idx_tancat and mig_tancat and anu_tancat:
+                    lletra_frame = "Y"
+
+                break
+
+        # -------------------------------------------------------------
+        # 🛡️ FILTRE DE PROCESSAMENT TEMPORAL (Mitjana Mòbil)
+        # -------------------------------------------------------------
+        if lletra_frame is not None:
+            self.historial_instantani.append(lletra_frame)
+            if len(self.historial_instantani) > self.MIDA_FILTRE:
+                self.historial_instantani.pop(0)
+
+            lletra_majoritaria = max(set(self.historial_instantani), key=self.historial_instantani.count)
+            
+            if lletra_majoritaria == self.lletra_estabilitzada:
+                self.contador_estabilitat += 1
+            else:
+                self.lletra_estabilitzada = lletra_majoritaria
+                self.contador_estabilitat = 0
+
+            if self.contador_estabilitat >= self.FOTOGRAMES_REQUERITS:
+                if lletra_majoritaria == self.lletra_actual:
+                    self.signe_completat = True
+                    self.temps_inici_exit = ara
+                    return f"¡MOLT BE! LLETRA {self.lletra_actual}", (0, 255, 0), True
+                else:
+                    return f"DETECTAT GEST DE LA '{lletra_majoritaria}'", (255, 165, 0), False
+        else:
+            if len(self.historial_instantani) > 0:
+                self.historial_instantani.pop(0)
+            self.contador_estabilitat = max(0, self.contador_estabilitat - 1)
+
+        return self.missatge_pantalla, self.color_text, False
